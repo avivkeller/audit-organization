@@ -1,0 +1,69 @@
+name: Organization Auditor
+description: Reports inactive GitHub organization members in a tracking issue. Never removes anyone.
+author: organization-auditor
+
+branding:
+  icon: users
+  color: blue
+
+inputs:
+  org:
+    description: 'GitHub organization login to audit.'
+    required: true
+  token:
+    description: 'PAT or GitHub App token with read:org + repo. The default GITHUB_TOKEN is NOT sufficient for org-wide reads.'
+    required: true
+  report-repo:
+    description: 'owner/repo where the org-wide report issue is filed. Defaults to the running repo.'
+    required: false
+    default: ''
+  inactivity-days:
+    description: 'Days of inactivity before a member is reported.'
+    required: false
+    default: '90'
+  team-map:
+    description: 'JSON object mapping team slug to "owner/repo" for per-team audits.'
+    required: false
+    default: '{}'
+  dry-run:
+    description: 'If true, log the report instead of opening/updating an issue.'
+    required: false
+    default: 'false'
+  ignore-repositories:
+    description: 'Comma-separated owner/repo entries excluded from activity scoring.'
+    required: false
+    default: ''
+  ignore-members:
+    description: 'Comma-separated logins excluded from the audit.'
+    required: false
+    default: ''
+  ignore-teams:
+    description: 'Comma-separated team slugs whose members are excluded from the audit.'
+    required: false
+    default: ''
+  include-outside-collaborators:
+    description: 'Also audit outside collaborators.'
+    required: false
+    default: 'false'
+  include-bots:
+    description: 'Audit logins ending in [bot]. Default skips them.'
+    required: false
+    default: 'false'
+  interaction-types:
+    description: 'Comma-separated allowlist: commit,pr,pr-review,pr-comment,issue,issue-comment. Including issue-comment / pr-comment automatically engages slower comment probing.'
+    required: false
+    default: 'commit,pr,pr-review,issue'
+  concurrency:
+    description: 'Max parallel per-member probes.'
+    required: false
+    default: '5'
+
+outputs:
+  inactive-count:
+    description: 'Total inactive members in the org-wide report.'
+  issue-url:
+    description: 'URL of the org-wide report issue (empty in dry-run).'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.mjs'

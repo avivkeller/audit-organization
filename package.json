@@ -1,0 +1,52 @@
+{
+	"name": "organization-auditor",
+	"version": "1.0.0",
+	"description": "GitHub Action that audits a GitHub organization for inactive members and reports findings as a tracking issue.",
+	"license": "MIT",
+	"author": "Aviv Keller",
+	"private": true,
+	"type": "module",
+	"main": "dist/index.js",
+	"scripts": {
+		"build": "tsdown",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest run --coverage",
+		"lint": "eslint src",
+		"lint:fix": "eslint src --fix",
+		"format": "prettier --write \"src/**/*.{ts,json}\" \"*.{json,md,yml,yaml}\"",
+		"typecheck": "tsc --noEmit",
+		"local": "local-action run . src/main.ts .env",
+		"prepare": "husky"
+	},
+	"lint-staged": {
+		"*.{ts,js}": [
+			"eslint --fix",
+			"prettier --write"
+		],
+		"*.{json,md,yml,yaml}": [
+			"prettier --write"
+		]
+	},
+	"dependencies": {
+		"@actions/core": "^3.0.1",
+		"@actions/github": "^9.1.1",
+		"@octokit/plugin-retry": "^8.1.0",
+		"@octokit/plugin-throttling": "^11.0.3"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@github/local-action": "^7.0.1",
+		"@types/node": "^25.6.0",
+		"@typescript-eslint/eslint-plugin": "^8.59.0",
+		"@vitest/coverage-v8": "^4.1.5",
+		"eslint": "^10.2.1",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.4.0",
+		"prettier": "^3.8.3",
+		"tsdown": "^0.21.10",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.59.0",
+		"vitest": "^4.1.5"
+	}
+}
