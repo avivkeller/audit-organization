@@ -22,32 +22,6 @@ function parseCsvSet(value: string): Set<string> {
 	);
 }
 
-function parseTeamMap(raw: string): Record<string, { owner: string; repo: string }> {
-	const trimmed = raw.trim();
-	if (!trimmed || trimmed === '{}') return {};
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch (err) {
-		const cause = err instanceof Error ? err.message : String(err);
-		throw new Error(`team-map: invalid JSON (${cause})`, { cause: err });
-	}
-	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-		throw new Error('team-map: expected a JSON object mapping team slug -> "owner/repo"');
-	}
-	const out: Record<string, { owner: string; repo: string }> = {};
-	for (const [slug, repoFullName] of Object.entries(parsed)) {
-		if (!slug.trim()) {
-			throw new Error('team-map: team slug must be non-empty');
-		}
-		if (typeof repoFullName !== 'string') {
-			throw new Error(`team-map[${slug}]: value must be a string "owner/repo"`);
-		}
-		out[slug] = parseRepoFullName(repoFullName, `team-map[${slug}]`);
-	}
-	return out;
-}
-
 function parseInteractionTypes(value: string): Set<InteractionType> {
 	const csv = parseCsvSet(value);
 	if (csv.size === 0) {
@@ -77,7 +51,7 @@ function parseBool(value: string): boolean {
 }
 
 // `context.repo` throws synchronously when GITHUB_REPOSITORY is unset, so we
-// can't read it eagerly at module load — that breaks tests and `local-action`.
+// can't read it eagerly at module load - that breaks tests and `local-action`.
 function resolveContextRepo(): { owner: string; repo: string } | null {
 	if (!process.env.GITHUB_REPOSITORY) return null;
 	return context.repo;
@@ -90,18 +64,12 @@ function warnAboutExpensiveChoices(cfg: {
 	interactionTypes: ReadonlySet<InteractionType>;
 	concurrency: number;
 	includeOutsideCollaborators: boolean;
-	teamMap: Record<string, unknown>;
 }): void {
-	if (cfg.interactionTypes.has('pr-review')) {
-		core.warning(
-			"interaction-types includes pr-review: this fetches recent PRs and inspects each PR's reviews per audited member — slowest signal, expect higher API usage",
-		);
-	}
 	const wantsComments =
 		cfg.interactionTypes.has('issue-comment') || cfg.interactionTypes.has('pr-comment');
 	if (wantsComments) {
 		core.warning(
-			'interaction-types includes issue/pr comments: comments must be paginated and filtered client-side, plus an org-wide search call per member — moderately slow',
+			'interaction-types includes issue/pr comments: comments are paginated globally on the user and filtered later on',
 		);
 	}
 	if (cfg.concurrency > 10) {
@@ -112,11 +80,6 @@ function warnAboutExpensiveChoices(cfg: {
 	if (cfg.includeOutsideCollaborators) {
 		core.warning(
 			'include-outside-collaborators=true: outside collaborators cannot belong to teams and will all be flagged as no-team in the org-wide audit',
-		);
-	}
-	if (Object.keys(cfg.teamMap).length > 20) {
-		core.warning(
-			`team-map has ${Object.keys(cfg.teamMap).length} entries: each team triggers a per-repo REST sweep — expect a long-running audit`,
 		);
 	}
 }
@@ -147,7 +110,6 @@ export function parseInputs(): AuditConfig {
 		'inactivity-days',
 	);
 
-	const teamMap = parseTeamMap(core.getInput('team-map') || '{}');
 	const dryRun = parseBool(core.getInput('dry-run') || 'false');
 
 	const ignoreRepositories = parseCsvSet(core.getInput('ignore-repositories'));
@@ -172,7 +134,6 @@ export function parseInputs(): AuditConfig {
 		interactionTypes,
 		concurrency,
 		includeOutsideCollaborators,
-		teamMap,
 	});
 
 	const nowDate = new Date();
@@ -185,7 +146,6 @@ export function parseInputs(): AuditConfig {
 		inactivityDays,
 		since: sinceDate.toISOString(),
 		now: nowDate.toISOString(),
-		teamMap: Object.freeze(teamMap),
 		dryRun,
 		ignoreRepositories,
 		ignoreMembers,

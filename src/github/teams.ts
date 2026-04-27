@@ -11,6 +11,7 @@ interface TeamsPageResponse {
 			pageInfo: PageInfo;
 			nodes: Array<{
 				slug: string;
+				description: string | null;
 				members: { pageInfo: PageInfo; nodes: Array<{ login: string }> };
 			}>;
 		};
@@ -25,9 +26,11 @@ interface TeamMembersPageResponse {
 	} | null;
 }
 
-// Single GraphQL query: list all teams and the first 100 members of each, with
-// outer (teams) and inner (members) pagination cursors. Fetching teams + their
-// members in one round-trip is dramatically cheaper than N REST calls.
+// Single GraphQL query: list all teams (with their description), and the first
+// 100 members of each, with outer (teams) and inner (members) pagination
+// cursors. The description is parsed for a `repo:` token to discover which
+// teams should be audited and where their report issue should be filed -
+// replacing the old `team-map` config input.
 const TEAMS_QUERY = /* GraphQL */ `
 	query ($org: String!, $cursor: String) {
 		organization(login: $org) {
@@ -38,6 +41,7 @@ const TEAMS_QUERY = /* GraphQL */ `
 				}
 				nodes {
 					slug
+					description
 					members(first: 100) {
 						pageInfo {
 							hasNextPage
@@ -72,13 +76,35 @@ const TEAM_MEMBERS_QUERY = /* GraphQL */ `
 	}
 `;
 
-// Inverted index: login -> set of team slugs. The org audit's "no team" check
-// is then a single map lookup per member instead of an N x M scan.
-export async function buildTeamMap(
-	octokit: Octokit,
-	org: string,
-): Promise<Map<string, Set<string>>> {
-	const map = new Map<string, Set<string>>();
+export interface TeamDiscovery {
+	// Inverted index: login -> set of team slugs. The org audit's "no team"
+	// check is then a single map lookup per member instead of an N x M scan.
+	readonly membership: Map<string, Set<string>>;
+	// slug -> report repo, derived from a `repo: owner/name` token in the team
+	// description. Teams without the token are not audited per-team.
+	readonly reportRepos: Map<string, { owner: string; repo: string }>;
+}
+
+// Description format: a token `repo: owner/name` anywhere in the description.
+// Optional surrounding `[...]` is allowed (some folks prefer the bracket
+// style). Case-insensitive on the `repo:` literal so `Repo:` works too. Only
+// the first match per description is honored - multi-repo per team has no
+// meaning here (the audit files exactly one report issue per team).
+const DESCRIPTION_REPO_PATTERN = /\brepo:\s*\[?\s*([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\s*\]?/i;
+
+export function parseReportRepoFromDescription(
+	description: string | null,
+): { owner: string; repo: string } | null {
+	if (!description) return null;
+	const match = DESCRIPTION_REPO_PATTERN.exec(description);
+	if (!match) return null;
+	const [owner, repo] = match[1].split('/');
+	return { owner, repo };
+}
+
+export async function buildTeamMap(octokit: Octokit, org: string): Promise<TeamDiscovery> {
+	const membership = new Map<string, Set<string>>();
+	const reportRepos = new Map<string, { owner: string; repo: string }>();
 	let cursor: string | null = null;
 
 	while (true) {
@@ -90,14 +116,18 @@ export async function buildTeamMap(
 			throw new Error(`organization "${org}" not found or token lacks visibility`);
 		}
 		for (const team of res.organization.teams.nodes) {
+			const reportRepo = parseReportRepoFromDescription(team.description);
+			if (reportRepo) reportRepos.set(team.slug, reportRepo);
+
 			const logins = team.members.nodes.map((m) => m.login);
 			if (team.members.pageInfo.hasNextPage) {
 				let inner: string | null = team.members.pageInfo.endCursor;
 				while (inner) {
-					const more: TeamMembersPageResponse = await octokit.graphql<TeamMembersPageResponse>(
-						TEAM_MEMBERS_QUERY,
-						{ org, slug: team.slug, cursor: inner },
-					);
+					const more = await octokit.graphql<TeamMembersPageResponse>(TEAM_MEMBERS_QUERY, {
+						org,
+						slug: team.slug,
+						cursor: inner,
+					});
 					const teamData = more.organization?.team;
 					if (!teamData) break;
 					for (const node of teamData.members.nodes) logins.push(node.login);
@@ -107,10 +137,10 @@ export async function buildTeamMap(
 				}
 			}
 			for (const login of logins) {
-				let teamsForUser = map.get(login);
+				let teamsForUser = membership.get(login);
 				if (!teamsForUser) {
 					teamsForUser = new Set();
-					map.set(login, teamsForUser);
+					membership.set(login, teamsForUser);
 				}
 				teamsForUser.add(team.slug);
 			}
@@ -119,7 +149,7 @@ export async function buildTeamMap(
 		cursor = res.organization.teams.pageInfo.endCursor;
 	}
 
-	return map;
+	return { membership, reportRepos };
 }
 
 export async function listTeamMembers(
@@ -132,7 +162,7 @@ export async function listTeamMembers(
 		team_slug: slug,
 		per_page: 100,
 	});
-	return (data as Array<{ login: string }>).map((m) => m.login);
+	return data.map((m) => m.login);
 }
 
 export interface TeamRepo {
@@ -151,7 +181,5 @@ export async function listTeamRepos(
 		team_slug: slug,
 		per_page: 100,
 	});
-	return (data as Array<{ owner: { login: string }; name: string; archived?: boolean }>).map(
-		(r) => ({ owner: r.owner.login, repo: r.name, archived: !!r.archived }),
-	);
+	return data.map((r) => ({ owner: r.owner.login, repo: r.name, archived: !!r.archived }));
 }

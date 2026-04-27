@@ -14,14 +14,14 @@ function escapeCell(s: string): string {
 }
 
 function memberRow(m: InactiveMember): string {
-	const teams = m.teams.length > 0 ? m.teams.map((t) => `\`${t}\``).join(', ') : '—';
-	const lastSeen = m.lastSeen ?? '—';
+	const teams = m.teams.length > 0 ? m.teams.map((t) => `\`${t}\``).join(', ') : '-';
+	const lastSeen = m.lastSeen ?? '-';
 	return `| @${escapeCell(m.login)} | ${m.reason} | ${escapeCell(lastSeen)} | ${teams} |`;
 }
 
 function errorsBlock(errors: readonly { login: string; cause: string }[]): string {
 	if (errors.length === 0) return '';
-	const lines = errors.map((e) => `- @${e.login} — \`${e.cause}\``);
+	const lines = errors.map((e) => `- @${e.login} - \`${e.cause}\``);
 	return ['## Errors', ...lines, ''].join('\n');
 }
 
@@ -35,7 +35,7 @@ function maybeTruncate(body: string): { body: string; truncated: boolean } {
 }
 
 export function renderOrgReport(result: OrgAuditResult, cfg: AuditConfig): RenderedReport {
-	const title = `Organization Inactivity Audit — ${result.org}`;
+	const title = `Organization Inactivity Audit - ${result.org}`;
 	const summary = [
 		`# ${title}`,
 		'',
@@ -72,11 +72,11 @@ export function renderOrgReport(result: OrgAuditResult, cfg: AuditConfig): Rende
 }
 
 export function renderTeamReport(result: TeamAuditResult, cfg: AuditConfig): RenderedReport {
-	const title = `Team Inactivity Audit — ${result.slug}`;
+	const title = `Team Inactivity Audit - ${result.slug}`;
 	const repos =
 		result.auditedRepos.length > 0
 			? result.auditedRepos.map((r) => `\`${r}\``).join(', ')
-			: '_(none — team has no auditable repos)_';
+			: '_(none - team has no auditable repos)_';
 
 	const summary = [
 		`# ${title}`,

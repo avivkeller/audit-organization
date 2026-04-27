@@ -1,33 +1,27 @@
 import * as core from '@actions/core';
+import { isWithinWindow, maxIso, type ActivityCache } from '../github/cache.js';
 import { mapWithConcurrency } from '../concurrency.js';
 import { filterMembers } from '../filter.js';
-import { listTeamMembers, listTeamRepos, type TeamRepo } from '../github/teams.js';
-import type {
-	AuditConfig,
-	AuditError,
-	InactiveMember,
-	Octokit,
-	TeamAuditResult,
-} from '../types.js';
-import { probeRepo } from './activity-rest.js';
-
-function intersectsIgnored(
-	userTeams: ReadonlySet<string>,
-	ignoreTeams: ReadonlySet<string>,
-): string | null {
-	for (const t of userTeams) {
-		if (ignoreTeams.has(t)) return t;
-	}
-	return null;
-}
+import {
+	listTeamMembers,
+	listTeamRepos,
+	type TeamDiscovery,
+	type TeamRepo,
+} from '../github/teams.js';
+import type { AuditError, InactiveMember, TeamAuditResult } from '../types.js';
+import type { RepoFilter } from './graphql.js';
+import { probeUserActivity, type UserProbeCache } from './probing.js';
+import { intersectsIgnored } from '../filter.js';
 
 export async function auditTeam(
-	octokit: Octokit,
-	cfg: AuditConfig,
+	cache: UserProbeCache,
 	slug: string,
 	reportRepo: { owner: string; repo: string },
 	teamMap: ReadonlyMap<string, ReadonlySet<string>>,
+	cacheData: ActivityCache,
 ): Promise<TeamAuditResult | null> {
+	const { octokit, cfg } = cache.ctx;
+
 	let rawMembers: string[];
 	let rawRepos: TeamRepo[];
 	try {
@@ -54,12 +48,16 @@ export async function auditTeam(
 		}
 		members.push(login);
 	}
-	const repos = rawRepos.filter(
-		(r) => !r.archived && !cfg.ignoreRepositories.has(`${r.owner}/${r.repo}`),
+	const teamRepos = new Set(
+		rawRepos
+			.filter((r) => !r.archived && !cfg.ignoreRepositories.has(`${r.owner}/${r.repo}`))
+			.map((r) => `${r.owner}/${r.repo}`),
 	);
 
-	if (repos.length === 0) {
-		// Nothing to probe against — by the team-scoped definition every member is
+	const teamCache: Record<string, string> = cacheData.teams[slug] ?? (cacheData.teams[slug] = {});
+
+	if (teamRepos.size === 0) {
+		// Nothing to probe against: by the team-scoped definition every member is
 		// trivially inactive. Surface that explicitly so the report is honest.
 		core.warning(`team audit "${slug}": no auditable repos (after filtering archived/ignored)`);
 		for (const login of members) {
@@ -73,7 +71,7 @@ export async function auditTeam(
 				login,
 				reason: 'no-activity',
 				teams: [slug],
-				lastSeen: null,
+				lastSeen: teamCache[login] ?? null,
 			})),
 			auditedRepos: [],
 			errors: [],
@@ -81,36 +79,50 @@ export async function auditTeam(
 		};
 	}
 
+	// Cache fast path: if the persisted cache proves the user was active inside
+	// the current window for THIS team, skip the GraphQL probes entirely.
+	const needsProbe: string[] = [];
+	const skippedByCache: string[] = [];
+	for (const login of members) {
+		if (isWithinWindow(teamCache[login], cfg.since)) skippedByCache.push(login);
+		else needsProbe.push(login);
+	}
+	if (skippedByCache.length > 0) {
+		core.info(
+			`team audit "${slug}": cache proved ${skippedByCache.length}/${members.length} members active without API calls`,
+		);
+	}
+	for (const login of skippedByCache) {
+		core.info(`audited @${login} in team "${slug}" as active (cached)`);
+	}
+
+	// Team audit is "active in any of the team's auditable repos".
+	const repoFilter: RepoFilter = (r) => teamRepos.has(r);
+
 	const errors: AuditError[] = [];
 	const inactive: InactiveMember[] = [];
 
-	await mapWithConcurrency(members, cfg.concurrency, async (login) => {
+	await mapWithConcurrency(needsProbe, cfg.concurrency, async (login) => {
 		try {
-			let active = false;
-			let latest: string | null = null;
-			// Walk the team's repos in series for a single member; the parallelism
-			// is across members. This keeps the per-member burst bounded and lets
-			// us short-circuit cheaply on the first hit.
-			for (const r of repos) {
-				const sig = await probeRepo(
-					octokit,
-					r.owner,
-					r.repo,
-					login,
-					cfg.since,
-					cfg.interactionTypes,
-				);
-				if (sig.hasActivity) {
-					active = true;
-					break;
-				}
-				if (sig.lastSeen && (!latest || sig.lastSeen > latest)) latest = sig.lastSeen;
-			}
-			if (active) {
+			// Time-bounded check via contributionsCollection. The per-repo
+			// breakdowns let us decide team-scoped activity in the window without
+			// per-repo polling. The probe cache deduplicates this fetch across the
+			// org audit and any other team audits the user appears in.
+			const sig = await probeUserActivity(cache, login, repoFilter);
+
+			const merged = maxIso(teamCache[login], sig.lastSeen);
+			if (merged) teamCache[login] = merged;
+
+			if (sig.hasActivity) {
 				core.info(`audited @${login} in team "${slug}" as active`);
 			} else {
 				core.info(`audited @${login} in team "${slug}" as inactive (no-activity)`);
-				inactive.push({ login, reason: 'no-activity', teams: [slug], lastSeen: latest });
+				inactive.push({
+					login,
+					reason: 'no-activity',
+					teams: [slug],
+					lastSeen: teamCache[login] ?? null,
+				});
 			}
 		} catch (err) {
 			const cause = err instanceof Error ? err.message : String(err);
@@ -126,22 +138,23 @@ export async function auditTeam(
 		reportRepo,
 		totalAudited: members.length,
 		inactive,
-		auditedRepos: repos.map((r) => `${r.owner}/${r.repo}`),
+		auditedRepos: [...teamRepos].sort(),
 		errors,
 		runAt: cfg.now,
 	};
 }
 
 // Sequential rather than parallel: each team audit is itself parallel across
-// its members, so stacking outer concurrency would multiply the burst.
+// its members, so stacking outer concurrency would multiply the burst. The
+// shared probe cache keeps duplicate-member probes cheap regardless of order.
 export async function auditTeams(
-	octokit: Octokit,
-	cfg: AuditConfig,
-	teamMap: ReadonlyMap<string, ReadonlySet<string>>,
+	cache: UserProbeCache,
+	discovery: TeamDiscovery,
+	cacheData: ActivityCache,
 ): Promise<TeamAuditResult[]> {
 	const results: TeamAuditResult[] = [];
-	for (const [slug, repo] of Object.entries(cfg.teamMap)) {
-		const result = await auditTeam(octokit, cfg, slug, repo, teamMap);
+	for (const [slug, repo] of discovery.reportRepos) {
+		const result = await auditTeam(cache, slug, repo, discovery.membership, cacheData);
 		if (result) results.push(result);
 	}
 	return results;

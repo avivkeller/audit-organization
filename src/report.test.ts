@@ -9,7 +9,6 @@ const cfg: AuditConfig = {
 	inactivityDays: 90,
 	since: '2026-01-26T00:00:00Z',
 	now: '2026-04-26T00:00:00Z',
-	teamMap: {},
 	dryRun: false,
 	ignoreRepositories: new Set(['acme/legacy']),
 	ignoreMembers: new Set(['svc-account']),
@@ -36,11 +35,11 @@ describe('renderOrgReport', () => {
 			runAt: '2026-04-26T00:00:00Z',
 		};
 		const rendered = renderOrgReport(result, cfg);
-		expect(rendered.title).toBe('Organization Inactivity Audit — acme');
+		expect(rendered.title).toBe('Organization Inactivity Audit - acme');
 		expect(rendered.labels).toEqual(['organization-auditor', 'audit:org']);
 		expect(rendered.body).toContain('Inactive: 2/10');
-		expect(rendered.body).toContain('| @alice | no-activity | — | `infra` |');
-		expect(rendered.body).toContain('| @bob | no-activity, no-team | 2025-12-01 | — |');
+		expect(rendered.body).toContain('| @alice | no-activity | - | `infra` |');
+		expect(rendered.body).toContain('| @bob | no-activity, no-team | 2025-12-01 | - |');
 		expect(rendered.truncated).toBe(false);
 	});
 
@@ -72,7 +71,7 @@ describe('renderOrgReport', () => {
 		};
 		const rendered = renderOrgReport(result, cfg);
 		expect(rendered.body).toContain('## Errors');
-		expect(rendered.body).toContain('@alice — `rate limited`');
+		expect(rendered.body).toContain('@alice - `rate limited`');
 	});
 
 	it('escapes pipe characters in cells', () => {
@@ -127,7 +126,7 @@ describe('renderTeamReport', () => {
 			runAt: '2026-04-26T00:00:00Z',
 		};
 		const rendered = renderTeamReport(result, cfg);
-		expect(rendered.title).toBe('Team Inactivity Audit — infra');
+		expect(rendered.title).toBe('Team Inactivity Audit - infra');
 		expect(rendered.labels).toEqual(['organization-auditor', 'audit:team:infra']);
 		expect(rendered.body).toContain('Repos audited: `acme/infra1`, `acme/infra2`');
 	});

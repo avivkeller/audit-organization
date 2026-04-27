@@ -7,6 +7,7 @@ import * as orgModule from './audit/org.js';
 import * as teamModule from './audit/team.js';
 import * as teamsModule from './github/teams.js';
 import * as issueModule from './github/issue.js';
+import * as cacheModule from './github/cache.js';
 import type { AuditConfig, Octokit, OrgAuditResult, TeamAuditResult } from './types.js';
 
 vi.mock('@actions/core', () => ({
@@ -29,6 +30,14 @@ vi.mock('./github/teams.js', () => ({
 	listTeamRepos: vi.fn(),
 }));
 vi.mock('./github/issue.js', () => ({ upsertIssue: vi.fn() }));
+vi.mock('./github/cache.js', async (importActual) => {
+	const actual = await importActual<typeof cacheModule>();
+	return {
+		...actual,
+		restoreActivityCache: vi.fn(),
+		saveActivityCache: vi.fn(),
+	};
+});
 
 const cfg = (overrides: Partial<AuditConfig> = {}): AuditConfig => ({
 	org: 'acme',
@@ -37,7 +46,6 @@ const cfg = (overrides: Partial<AuditConfig> = {}): AuditConfig => ({
 	inactivityDays: 90,
 	since: '2026-01-26T00:00:00Z',
 	now: '2026-04-26T00:00:00Z',
-	teamMap: {},
 	dryRun: false,
 	ignoreRepositories: new Set(),
 	ignoreMembers: new Set(),
@@ -60,9 +68,14 @@ const orgResult: OrgAuditResult = {
 	runAt: '2026-04-26T00:00:00Z',
 };
 
+const emptyDiscovery = () => ({
+	membership: new Map<string, Set<string>>(),
+	reportRepos: new Map<string, { owner: string; repo: string }>(),
+});
+
 beforeEach(() => {
 	vi.mocked(octokitModule.buildClient).mockReturnValue({} as Octokit);
-	vi.mocked(teamsModule.buildTeamMap).mockResolvedValue(new Map());
+	vi.mocked(teamsModule.buildTeamMap).mockResolvedValue(emptyDiscovery());
 	vi.mocked(orgModule.auditOrg).mockResolvedValue(orgResult);
 	vi.mocked(teamModule.auditTeams).mockResolvedValue([]);
 	vi.mocked(issueModule.upsertIssue).mockResolvedValue({
@@ -70,6 +83,8 @@ beforeEach(() => {
 		number: 1,
 		action: 'created',
 	});
+	vi.mocked(cacheModule.restoreActivityCache).mockResolvedValue({ org: {}, teams: {} });
+	vi.mocked(cacheModule.saveActivityCache).mockResolvedValue(undefined);
 });
 
 describe('run', () => {
@@ -86,23 +101,50 @@ describe('run', () => {
 		expect(core.setOutput).toHaveBeenCalledWith('issue-url', 'https://x/issues/1');
 	});
 
-	it('passes the same teamMap instance to org and team audits', async () => {
-		vi.mocked(inputsModule.parseInputs).mockReturnValue(
-			cfg({ teamMap: { infra: { owner: 'acme', repo: 'infra-board' } } }),
-		);
-		const sharedMap = new Map<string, Set<string>>([['alice', new Set(['infra'])]]);
-		vi.mocked(teamsModule.buildTeamMap).mockResolvedValue(sharedMap);
+	it('passes membership to org audit and the full discovery to team audits', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		const sharedDiscovery = {
+			membership: new Map<string, Set<string>>([['alice', new Set(['infra'])]]),
+			reportRepos: new Map([['infra', { owner: 'acme', repo: 'infra-board' }]]),
+		};
+		vi.mocked(teamsModule.buildTeamMap).mockResolvedValue(sharedDiscovery);
 
 		await run();
 
-		expect(vi.mocked(orgModule.auditOrg).mock.calls[0][2]).toBe(sharedMap);
-		expect(vi.mocked(teamModule.auditTeams).mock.calls[0][2]).toBe(sharedMap);
+		expect(vi.mocked(orgModule.auditOrg).mock.calls[0][1]).toBe(sharedDiscovery.membership);
+		expect(vi.mocked(teamModule.auditTeams).mock.calls[0][1]).toBe(sharedDiscovery);
 	});
 
-	it('runs per-team audits when team-map is non-empty', async () => {
-		vi.mocked(inputsModule.parseInputs).mockReturnValue(
-			cfg({ teamMap: { infra: { owner: 'acme', repo: 'infra-board' } } }),
+	it('restores cache before audits and saves after - even on failure', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		const restored = { org: { alice: '2026-04-20T00:00:00Z' }, teams: {} };
+		vi.mocked(cacheModule.restoreActivityCache).mockResolvedValue(restored);
+
+		await run();
+
+		expect(cacheModule.restoreActivityCache).toHaveBeenCalledWith('acme', expect.any(String));
+		expect(vi.mocked(orgModule.auditOrg).mock.calls[0][2]).toBe(restored);
+		expect(cacheModule.saveActivityCache).toHaveBeenCalledWith(
+			'acme',
+			expect.any(String),
+			restored,
 		);
+	});
+
+	it('saves cache even when the audit throws', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		vi.mocked(orgModule.auditOrg).mockRejectedValue(new Error('boom'));
+
+		await expect(run()).rejects.toThrow('boom');
+		expect(cacheModule.saveActivityCache).toHaveBeenCalled();
+	});
+
+	it('runs per-team audits when discovery surfaces at least one team report-repo', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		vi.mocked(teamsModule.buildTeamMap).mockResolvedValue({
+			membership: new Map(),
+			reportRepos: new Map([['infra', { owner: 'acme', repo: 'infra-board' }]]),
+		});
 		const teamResult: TeamAuditResult = {
 			slug: 'infra',
 			reportRepo: { owner: 'acme', repo: 'infra-board' },

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { auditOrg } from './org.js';
-import * as graphqlModule from './activity-graphql.js';
-import * as commentsModule from './activity-comments.js';
+import * as graphqlModule from './graphql.js';
 import * as membersModule from '../github/members.js';
+import { createContext, UserProbeCache } from './probing.js';
+import { emptyCache, type ActivityCache } from '../github/cache.js';
 import type { AuditConfig, Octokit } from '../types.js';
 
 vi.mock('@actions/core', () => ({
@@ -13,14 +14,15 @@ vi.mock('@actions/core', () => ({
 }));
 
 vi.mock('../github/members.js', () => ({ listOrgMembers: vi.fn() }));
-vi.mock('./activity-comments.js', () => ({ probeOrgComments: vi.fn() }));
-// Partial mock so the pure `activityFromContributions` keeps its real impl.
-vi.mock('./activity-graphql.js', async (importActual) => {
+// Partial mock so the pure helpers (activityFromContributions etc.) keep their
+// real impl while the network-touching functions are stubbed.
+vi.mock('./graphql.js', async (importActual) => {
 	const actual = await importActual<typeof graphqlModule>();
 	return {
 		...actual,
 		fetchOrgId: vi.fn(),
 		fetchOrgActivity: vi.fn(),
+		fetchUserCommentsInOrg: vi.fn(),
 	};
 });
 
@@ -31,7 +33,6 @@ const baseCfg = (overrides: Partial<AuditConfig> = {}): AuditConfig => ({
 	inactivityDays: 90,
 	since: '2026-01-26T00:00:00Z',
 	now: '2026-04-26T00:00:00Z',
-	teamMap: {},
 	dryRun: false,
 	ignoreRepositories: new Set(),
 	ignoreMembers: new Set(),
@@ -45,13 +46,19 @@ const baseCfg = (overrides: Partial<AuditConfig> = {}): AuditConfig => ({
 
 const fakeOctokit = {} as Octokit;
 
+const session = (overrides: Partial<AuditConfig> = {}): UserProbeCache =>
+	new UserProbeCache(createContext(fakeOctokit, baseCfg(overrides)));
+
 const ACTIVE_CONTRIBUTIONS = {
 	hasAnyContributions: true,
 	totalCommitContributions: 1,
 	totalIssueContributions: 0,
 	totalPullRequestContributions: 0,
 	totalPullRequestReviewContributions: 0,
-	commitContributionsByRepository: [],
+	contributionCalendar: { weeks: [] },
+	commitContributionsByRepository: [
+		{ repository: { nameWithOwner: 'acme/main' }, contributions: { totalCount: 1 } },
+	],
 	issueContributionsByRepository: [],
 	pullRequestContributionsByRepository: [],
 	pullRequestReviewContributionsByRepository: [],
@@ -59,10 +66,7 @@ const ACTIVE_CONTRIBUTIONS = {
 
 beforeEach(() => {
 	vi.mocked(graphqlModule.fetchOrgId).mockResolvedValue('O_1');
-	vi.mocked(commentsModule.probeOrgComments).mockResolvedValue({
-		hasActivity: false,
-		lastSeen: null,
-	});
+	vi.mocked(graphqlModule.fetchUserCommentsInOrg).mockResolvedValue([]);
 });
 
 describe('auditOrg', () => {
@@ -70,7 +74,7 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
 
-		const result = await auditOrg(fakeOctokit, baseCfg(), new Map());
+		const result = await auditOrg(session(), new Map(), emptyCache());
 		expect(result.inactive).toEqual([
 			{ login: 'alice', reason: 'no-activity, no-team', teams: [], lastSeen: null },
 		]);
@@ -83,7 +87,11 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
 
-		const result = await auditOrg(fakeOctokit, baseCfg(), new Map([['alice', new Set(['infra'])]]));
+		const result = await auditOrg(
+			session(),
+			new Map([['alice', new Set(['infra'])]]),
+			emptyCache(),
+		);
 		expect(result.inactive[0].reason).toBe('no-activity');
 		expect(result.inactive[0].teams).toEqual(['infra']);
 	});
@@ -92,7 +100,7 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(ACTIVE_CONTRIBUTIONS);
 
-		const result = await auditOrg(fakeOctokit, baseCfg(), new Map());
+		const result = await auditOrg(session(), new Map(), emptyCache());
 		expect(result.inactive[0].reason).toBe('no-team');
 	});
 
@@ -100,7 +108,11 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(ACTIVE_CONTRIBUTIONS);
 
-		const result = await auditOrg(fakeOctokit, baseCfg(), new Map([['alice', new Set(['infra'])]]));
+		const result = await auditOrg(
+			session(),
+			new Map([['alice', new Set(['infra'])]]),
+			emptyCache(),
+		);
 		expect(result.inactive).toEqual([]);
 	});
 
@@ -108,7 +120,7 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice', 'bob']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
 
-		await auditOrg(fakeOctokit, baseCfg({ ignoreMembers: new Set(['alice']) }), new Map());
+		await auditOrg(session({ ignoreMembers: new Set(['alice']) }), new Map(), emptyCache());
 		const audited = vi.mocked(graphqlModule.fetchOrgActivity).mock.calls.map((c) => c[1]);
 		expect(audited).toEqual(['bob']);
 	});
@@ -121,7 +133,7 @@ describe('auditOrg', () => {
 			['alice', new Set(['alumni'])],
 			['bob', new Set(['infra'])],
 		]);
-		await auditOrg(fakeOctokit, baseCfg({ ignoreTeams: new Set(['alumni']) }), teamMap);
+		await auditOrg(session({ ignoreTeams: new Set(['alumni']) }), teamMap, emptyCache());
 		const audited = vi.mocked(graphqlModule.fetchOrgActivity).mock.calls.map((c) => c[1]);
 		expect(audited).toEqual(['bob']);
 	});
@@ -130,7 +142,7 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice', 'dependabot[bot]']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
 
-		await auditOrg(fakeOctokit, baseCfg(), new Map());
+		await auditOrg(session(), new Map(), emptyCache());
 		const audited = vi.mocked(graphqlModule.fetchOrgActivity).mock.calls.map((c) => c[1]);
 		expect(audited).toEqual(['alice']);
 	});
@@ -139,7 +151,7 @@ describe('auditOrg', () => {
 		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice', 'dependabot[bot]']);
 		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
 
-		await auditOrg(fakeOctokit, baseCfg({ includeBots: true }), new Map());
+		await auditOrg(session({ includeBots: true }), new Map(), emptyCache());
 		const audited = vi
 			.mocked(graphqlModule.fetchOrgActivity)
 			.mock.calls.map((c) => c[1])
@@ -154,37 +166,147 @@ describe('auditOrg', () => {
 			return null;
 		});
 
-		const result = await auditOrg(fakeOctokit, baseCfg(), new Map());
+		const result = await auditOrg(session(), new Map(), emptyCache());
 		expect(result.errors).toEqual([{ login: 'alice', cause: 'boom' }]);
 		expect(result.inactive.map((m) => m.login)).toEqual(['bob']);
 	});
 
-	it('engages comment probing when interaction-types includes a comment type', async () => {
-		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
-		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
-		vi.mocked(commentsModule.probeOrgComments).mockResolvedValue({
-			hasActivity: true,
-			lastSeen: null,
+	describe('comment fallback', () => {
+		it('probes comments when contributionsCollection is empty and a comment type is enabled', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+			vi.mocked(graphqlModule.fetchUserCommentsInOrg).mockResolvedValue([
+				{ repo: 'acme/main', type: 'issue-comment', updatedAt: '2026-04-10T00:00:00Z' },
+			]);
+
+			const result = await auditOrg(
+				session({ interactionTypes: new Set(['commit', 'issue-comment']) }),
+				new Map([['alice', new Set(['infra'])]]),
+				emptyCache(),
+			);
+			expect(graphqlModule.fetchUserCommentsInOrg).toHaveBeenCalled();
+			expect(result.inactive).toEqual([]);
 		});
 
-		const result = await auditOrg(
-			fakeOctokit,
-			baseCfg({ interactionTypes: new Set(['commit', 'issue-comment']) }),
-			new Map([['alice', new Set(['infra'])]]),
-		);
-		expect(commentsModule.probeOrgComments).toHaveBeenCalled();
-		expect(result.inactive).toEqual([]);
+		it('does NOT call fetchUserCommentsInOrg when no comment type is enabled', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+
+			await auditOrg(
+				session({ interactionTypes: new Set(['commit']) }),
+				new Map([['alice', new Set(['infra'])]]),
+				emptyCache(),
+			);
+			expect(graphqlModule.fetchUserCommentsInOrg).not.toHaveBeenCalled();
+		});
+
+		it('does NOT call fetchUserCommentsInOrg when contributionsCollection already shows activity', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(ACTIVE_CONTRIBUTIONS);
+
+			await auditOrg(
+				session({ interactionTypes: new Set(['commit', 'issue-comment']) }),
+				new Map([['alice', new Set(['infra'])]]),
+				emptyCache(),
+			);
+			expect(graphqlModule.fetchUserCommentsInOrg).not.toHaveBeenCalled();
+		});
+
+		it('records the comment updatedAt as lastSeen in the cache', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+			vi.mocked(graphqlModule.fetchUserCommentsInOrg).mockResolvedValue([
+				{ repo: 'acme/main', type: 'pr-comment', updatedAt: '2026-04-12T08:00:00Z' },
+			]);
+			const persisted = emptyCache();
+			await auditOrg(
+				session({ interactionTypes: new Set(['pr-comment']) }),
+				new Map([['alice', new Set(['infra'])]]),
+				persisted,
+			);
+			expect(persisted.org.alice).toBe('2026-04-12T08:00:00Z');
+		});
 	});
 
-	it('does NOT call probeOrgComments when comment types are not in interaction-types', async () => {
-		vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
-		vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+	describe('with @actions/cache', () => {
+		it('skips probe when cache proves member is active inside the window', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			const persisted: ActivityCache = { org: { alice: '2026-04-20T00:00:00Z' }, teams: {} };
+			// since=2026-01-26, alice cached at 2026-04-20 => active without probe.
 
-		await auditOrg(
-			fakeOctokit,
-			baseCfg({ interactionTypes: new Set(['commit']) }),
-			new Map([['alice', new Set(['infra'])]]),
-		);
-		expect(commentsModule.probeOrgComments).not.toHaveBeenCalled();
+			const result = await auditOrg(session(), new Map([['alice', new Set(['infra'])]]), persisted);
+			expect(graphqlModule.fetchOrgActivity).not.toHaveBeenCalled();
+			expect(graphqlModule.fetchOrgId).not.toHaveBeenCalled();
+			expect(result.inactive).toEqual([]);
+		});
+
+		it('falls back to probe when cached lastSeen is older than the window', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+			const persisted: ActivityCache = { org: { alice: '2025-08-01T00:00:00Z' }, teams: {} };
+
+			const result = await auditOrg(session(), new Map([['alice', new Set(['infra'])]]), persisted);
+			expect(graphqlModule.fetchOrgActivity).toHaveBeenCalled();
+			// Probe found nothing, so the report falls back to the (stale) cached value.
+			expect(result.inactive[0].lastSeen).toBe('2025-08-01T00:00:00Z');
+		});
+
+		it('updates the cache with the freshest observed lastSeen', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue({
+				hasAnyContributions: true,
+				totalCommitContributions: 1,
+				totalIssueContributions: 0,
+				totalPullRequestContributions: 0,
+				totalPullRequestReviewContributions: 0,
+				contributionCalendar: {
+					weeks: [
+						{
+							contributionDays: [
+								{ date: '2026-04-15', contributionCount: 2 },
+								{ date: '2026-04-16', contributionCount: 0 },
+							],
+						},
+					],
+				},
+				commitContributionsByRepository: [
+					{ repository: { nameWithOwner: 'acme/main' }, contributions: { totalCount: 2 } },
+				],
+				issueContributionsByRepository: [],
+				pullRequestContributionsByRepository: [],
+				pullRequestReviewContributionsByRepository: [],
+			});
+			const persisted: ActivityCache = { org: { alice: '2025-12-01T00:00:00Z' }, teams: {} };
+
+			await auditOrg(session(), new Map([['alice', new Set(['infra'])]]), persisted);
+			expect(persisted.org.alice).toBe('2026-04-15T23:59:59Z');
+		});
+
+		it('does not call fetchOrgId when every candidate is cache-resolved', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice', 'bob']);
+			const persisted: ActivityCache = {
+				org: { alice: '2026-04-20T00:00:00Z', bob: '2026-04-21T00:00:00Z' },
+				teams: {},
+			};
+
+			await auditOrg(
+				session(),
+				new Map([
+					['alice', new Set(['infra'])],
+					['bob', new Set(['infra'])],
+				]),
+				persisted,
+			);
+			expect(graphqlModule.fetchOrgId).not.toHaveBeenCalled();
+		});
+
+		it('reports cached lastSeen even when the timestamp predates the window', async () => {
+			vi.mocked(membersModule.listOrgMembers).mockResolvedValue(['alice']);
+			vi.mocked(graphqlModule.fetchOrgActivity).mockResolvedValue(null);
+			const persisted: ActivityCache = { org: { alice: '2024-06-15T00:00:00Z' }, teams: {} };
+
+			const result = await auditOrg(session(), new Map([['alice', new Set(['infra'])]]), persisted);
+			expect(result.inactive[0].lastSeen).toBe('2024-06-15T00:00:00Z');
+		});
 	});
 });

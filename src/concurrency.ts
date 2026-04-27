@@ -1,5 +1,5 @@
 // Bounded-parallelism map: spawns up to `limit` workers that share a cursor.
-// Used instead of pulling in p-limit — same semantics for our needs.
+// Used instead of pulling in p-limit - same semantics for our needs.
 export async function mapWithConcurrency<T, R>(
 	items: readonly T[],
 	limit: number,

@@ -49,7 +49,6 @@ describe('parseInputs', () => {
 		expect(cfg.includeBots).toBe(false);
 		expect(cfg.includeOutsideCollaborators).toBe(false);
 		expect(cfg.concurrency).toBe(5);
-		expect(cfg.teamMap).toEqual({});
 		expect(cfg.ignoreTeams).toEqual(new Set());
 		expect(Array.from(cfg.interactionTypes).sort()).toEqual(['commit', 'issue', 'pr', 'pr-review']);
 		expect(Object.isFrozen(cfg)).toBe(true);
@@ -97,32 +96,6 @@ describe('parseInputs', () => {
 		expect(() => parseInputs()).toThrow(/report-repo/);
 	});
 
-	it('parses team-map JSON into record of owner/repo', () => {
-		setInputs({
-			...minimal,
-			'team-map': '{"infra":"acme/infra-board","data":"acme/data-board"}',
-		});
-		expect(parseInputs().teamMap).toEqual({
-			infra: { owner: 'acme', repo: 'infra-board' },
-			data: { owner: 'acme', repo: 'data-board' },
-		});
-	});
-
-	it('throws on malformed team-map JSON', () => {
-		setInputs({ ...minimal, 'team-map': '{not-json' });
-		expect(() => parseInputs()).toThrow(/team-map/);
-	});
-
-	it('throws when team-map is an array', () => {
-		setInputs({ ...minimal, 'team-map': '["a","b"]' });
-		expect(() => parseInputs()).toThrow(/team-map/);
-	});
-
-	it('throws when team-map value is not "owner/repo"', () => {
-		setInputs({ ...minimal, 'team-map': '{"infra":"missing-slash"}' });
-		expect(() => parseInputs()).toThrow(/team-map/);
-	});
-
 	it('parses CSV ignore lists, trimming whitespace', () => {
 		setInputs({
 			...minimal,
@@ -152,12 +125,6 @@ describe('parseInputs', () => {
 	it('parses ignore-teams as a CSV set', () => {
 		setInputs({ ...minimal, 'ignore-teams': 'alumni , owners' });
 		expect([...parseInputs().ignoreTeams].sort()).toEqual(['alumni', 'owners']);
-	});
-
-	it('warns when pr-review is in interaction-types', () => {
-		setInputs({ ...minimal, 'interaction-types': 'commit,pr-review' });
-		parseInputs();
-		expect(core.warning).toHaveBeenCalledWith(expect.stringMatching(/pr-review/));
 	});
 
 	it('warns when comments are in interaction-types', () => {

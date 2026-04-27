@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildTeamMap, listTeamMembers, listTeamRepos } from './teams.js';
+import {
+	buildTeamMap,
+	listTeamMembers,
+	listTeamRepos,
+	parseReportRepoFromDescription,
+} from './teams.js';
 import type { Octokit } from '../types.js';
 
 function makeOctokit(graphql: (q: string, vars: unknown) => Promise<unknown>): Octokit {
@@ -31,7 +36,7 @@ describe('buildTeamMap', () => {
 				},
 			},
 		}));
-		const map = await buildTeamMap(octokit, 'acme');
+		const map = (await buildTeamMap(octokit, 'acme')).membership;
 		expect(map.get('alice')).toEqual(new Set(['infra']));
 		expect(map.get('bob')).toEqual(new Set(['infra', 'data']));
 		expect(map.get('carol')).toEqual(new Set(['data']));
@@ -76,7 +81,7 @@ describe('buildTeamMap', () => {
 				},
 			};
 		});
-		const map = await buildTeamMap(octokit, 'acme');
+		const map = (await buildTeamMap(octokit, 'acme')).membership;
 		expect(map.get('alice')).toEqual(new Set(['infra']));
 		expect(map.get('bob')).toEqual(new Set(['data']));
 	});
@@ -114,7 +119,7 @@ describe('buildTeamMap', () => {
 				},
 			};
 		});
-		const map = await buildTeamMap(octokit, 'acme');
+		const map = (await buildTeamMap(octokit, 'acme')).membership;
 		expect(map.get('alice')).toEqual(new Set(['infra']));
 		expect(map.get('bob')).toEqual(new Set(['infra']));
 	});
@@ -136,13 +141,108 @@ describe('buildTeamMap', () => {
 				},
 			},
 		}));
-		const map = await buildTeamMap(octokit, 'acme');
+		const map = (await buildTeamMap(octokit, 'acme')).membership;
 		expect(map.size).toBe(0);
 	});
 
 	it('throws when org is unknown', async () => {
 		const octokit = makeOctokit(async () => ({ organization: null }));
 		await expect(buildTeamMap(octokit, 'ghost')).rejects.toThrow(/ghost/);
+	});
+
+	it('extracts a `repo:` token from each team description into reportRepos', async () => {
+		const octokit = makeOctokit(async () => ({
+			organization: {
+				teams: {
+					pageInfo: { hasNextPage: false, endCursor: null },
+					nodes: [
+						{
+							slug: 'infra',
+							description: 'Infra team. repo: acme/infra-board',
+							members: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [{ login: 'alice' }],
+							},
+						},
+						{
+							slug: 'data',
+							description: '[Data] repo: [acme/data-board]',
+							members: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [{ login: 'bob' }],
+							},
+						},
+						{
+							// No `repo:` token → not auditable.
+							slug: 'fleet',
+							description: 'Random description without the token',
+							members: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [{ login: 'carol' }],
+							},
+						},
+						{
+							slug: 'silent',
+							description: null,
+							members: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [{ login: 'dave' }],
+							},
+						},
+					],
+				},
+			},
+		}));
+		const { reportRepos } = await buildTeamMap(octokit, 'acme');
+		expect(reportRepos.get('infra')).toEqual({ owner: 'acme', repo: 'infra-board' });
+		expect(reportRepos.get('data')).toEqual({ owner: 'acme', repo: 'data-board' });
+		expect(reportRepos.has('fleet')).toBe(false);
+		expect(reportRepos.has('silent')).toBe(false);
+	});
+});
+
+describe('parseReportRepoFromDescription', () => {
+	it('matches `repo: owner/name`', () => {
+		expect(parseReportRepoFromDescription('repo: acme/board')).toEqual({
+			owner: 'acme',
+			repo: 'board',
+		});
+	});
+
+	it('matches `repo: [owner/name]`', () => {
+		expect(parseReportRepoFromDescription('repo: [acme/board]')).toEqual({
+			owner: 'acme',
+			repo: 'board',
+		});
+	});
+
+	it('matches the token embedded in surrounding text', () => {
+		expect(
+			parseReportRepoFromDescription('Backend infra team. repo: acme/infra-board (audit target).'),
+		).toEqual({ owner: 'acme', repo: 'infra-board' });
+	});
+
+	it('is case-insensitive on the literal', () => {
+		expect(parseReportRepoFromDescription('Repo: acme/board')).toEqual({
+			owner: 'acme',
+			repo: 'board',
+		});
+	});
+
+	it('returns null when no token is present', () => {
+		expect(parseReportRepoFromDescription('just a description')).toBeNull();
+	});
+
+	it('returns null on null/empty descriptions', () => {
+		expect(parseReportRepoFromDescription(null)).toBeNull();
+		expect(parseReportRepoFromDescription('')).toBeNull();
+	});
+
+	it('returns the first match when several `repo:` tokens are present', () => {
+		expect(parseReportRepoFromDescription('repo: acme/first repo: acme/second')).toEqual({
+			owner: 'acme',
+			repo: 'first',
+		});
 	});
 });
 

@@ -28,53 +28,33 @@ export async function upsertIssue(octokit: Octokit, params: UpsertParams): Promi
 		return { url: '', number: null, action: 'dry-run' };
 	}
 
-	const existing = (await octokit.paginate('GET /repos/{owner}/{repo}/issues', {
+	const { data: existing } = await octokit.request('GET /repos/{owner}/{repo}/issues', {
 		owner: params.owner,
 		repo: params.repo,
 		state: 'open',
 		labels: params.labels.join(','),
-		per_page: 100,
-	})) as Array<{ number: number; html_url: string; updated_at: string; pull_request?: object }>;
+		per_page: 1,
+	});
 
-	// /issues returns PRs too — filter them out so a labelled PR doesn't get
-	// misinterpreted as our audit issue.
-	const matches = existing.filter((i) => !i.pull_request);
-
-	if (matches.length === 0) {
-		const created = await octokit.request('POST /repos/{owner}/{repo}/issues', {
+	if (existing.length === 0) {
+		const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues', {
 			owner: params.owner,
 			repo: params.repo,
 			title: params.title,
 			body: params.body,
 			labels: [...params.labels],
 		});
-		const data = created.data as { number: number; html_url: string };
 		core.info(`opened issue #${data.number} in ${params.owner}/${params.repo}`);
 		return { url: data.html_url, number: data.number, action: 'created' };
 	}
 
-	if (matches.length > 1) {
-		core.warning(
-			`found ${matches.length} open audit issues in ${params.owner}/${params.repo}; updating most recently updated`,
-		);
-	}
-
-	matches.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
-	const target = matches[0];
-
 	await octokit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
 		owner: params.owner,
 		repo: params.repo,
-		issue_number: target.number,
+		issue_number: existing[0].number,
 		body: params.body,
 	});
-	// Comment is the visible signal a re-run happened — body overwrites silently.
-	await octokit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
-		owner: params.owner,
-		repo: params.repo,
-		issue_number: target.number,
-		body: `Re-audited at ${params.runAt}`,
-	});
-	core.info(`updated issue #${target.number} in ${params.owner}/${params.repo}`);
-	return { url: target.html_url, number: target.number, action: 'updated' };
+
+	core.info(`updated issue #${existing[0].number} in ${params.owner}/${params.repo}`);
+	return { url: existing[0].html_url, number: existing[0].number, action: 'updated' };
 }

@@ -16,7 +16,7 @@ const ThrottledGitHub = GitHub.plugin(throttling, retry);
 export function buildClient(token: string): Octokit {
 	const options = getOctokitOptions(token, {
 		throttle: {
-			// Primary rate-limit (5000/hr authenticated). Retry up to 3 times — past
+			// Primary rate-limit (5000/hr authenticated). Retry up to 3 times - past
 			// that, the budget is genuinely exhausted and waiting longer rarely helps.
 			onRateLimit: (
 				retryAfter: number,

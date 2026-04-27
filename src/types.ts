@@ -26,7 +26,6 @@ export interface AuditConfig {
 	readonly inactivityDays: number;
 	readonly since: string;
 	readonly now: string;
-	readonly teamMap: Readonly<Record<string, { owner: string; repo: string }>>;
 	readonly dryRun: boolean;
 	readonly ignoreRepositories: ReadonlySet<string>;
 	readonly ignoreMembers: ReadonlySet<string>;
