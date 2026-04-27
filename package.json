@@ -1,6 +1,6 @@
 {
 	"name": "organization-auditor",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "GitHub Action that audits a GitHub organization for inactive members and reports findings as a tracking issue.",
 	"license": "MIT",
 	"author": "Aviv Keller",
